@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+set -x
+
 bindir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 etcdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -483,7 +485,102 @@ function filelist() {
   jqify "${msg}"
 }
 
+# Requires: curl, jq
+# Works on: macOS, Linux
+# Usage: fileupload_new <file> <channels> [comment] [title]
+# Environment: SLACK_TOKEN must be set
+
 function fileupload() {
+
+  local token="${token}"
+  local channel="${channels}"
+  local comment="${comment}"
+  local file="${file}"
+  local filename="${filename:-$(basename "$file")}"
+
+  echo FILE is ${file}
+  if [ -z "$SLACK_TOKEN" ]; then
+    echo "Error: SLACK_TOKEN not set" >&2
+    return 1
+  fi
+
+  # Handle stdin input
+  if [ -z "$file" ] || [ "$file" == "-" ]; then
+    tmpfile=$(mktemp)
+    cat > "$tmpfile"
+    file="$tmpfile"
+    filename="${filename:-stdin_input}"
+    cleanup="true"
+  fi
+
+  if [ ! -f "$file" ]; then
+    echo "Error: file not found: $file" >&2
+    return 1
+  fi
+
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    filesize=$(stat -f%z "$file")  # macOS
+  else
+    filesize=$(stat -c%s "$file")  # Linux
+  fi
+
+  echo "→ Requesting upload URL from Slack..."
+  # For some reason, this local upload_payload does not work with files.getUploadURLExternal API
+  local upload_payload
+  upload_payload=$(jq -n \
+    --arg filename "$filename" \
+    --arg filesize "$filesize" \
+    '{
+      filename: $filename,
+      length: ($filesize|tonumber),
+    }')
+
+  local upload_info
+  upload_info=$(curl -s -X POST "https://slack.com/api/files.getUploadURLExternal?filename=$filename&length=$filesize" \
+    -H "Authorization: Bearer $SLACK_TOKEN" \
+    -H "Content-Type: application/json; charset=utf-8")
+    #--data "$upload_payload"
+    #--data "$(jq -n --arg fn "$filename" --arg ft "auto" --arg fs "$filesize" '{filename: $fn, length: ($fs|tonumber), filetype: $ft}')")
+
+  local ok
+  ok=$(echo "$upload_info" | jq -r '.ok')
+  if [ "$ok" != "true" ]; then
+    echo "Error: Failed to get upload URL:" >&2
+    echo "$upload_info" | jq >&2
+    return 1
+  fi
+
+  local upload_url id
+  upload_url=$(echo "$upload_info" | jq -r '.upload_url')
+  id=$(echo "$upload_info" | jq -r '.file_id')
+
+  echo "→ Uploading file to Slack temporary storage..."
+  curl -X POST --upload-file ${file} $upload_url
+
+  echo "→ Finalizing file upload..."
+  local publish_payload
+  publish_payload=$(jq -n \
+    --argjson files "[{\"id\": \"$id\", \"title\": \"$title\"}]" \
+    --arg channels "$channels" \
+    --arg comment "$comment" \
+    --arg title "$title" \
+    '{
+      files: $files,
+      channel_id: $channels,
+      initial_comment: $comment,
+      channels: $channels,
+    }')
+
+  local publish_response
+  publish_response=$(curl -s -X POST "https://slack.com/api/files.completeUploadExternal" \
+    -H "Authorization: Bearer $SLACK_TOKEN" \
+    -H "Content-Type: application/json; charset=utf-8" \
+    --data "$publish_payload")
+   
+  echo "$publish_response" | jq
+}
+
+function fileupload_old() {
   [ -n "${stdin}" ] && [ -z "${file}" ] && file=${stdin}
 
   if [ -f "${file}" ]; then
