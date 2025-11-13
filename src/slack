@@ -53,6 +53,7 @@ while (( "$#" )); do
     --compact|-cp) compact='-c' ; shift ;;
     --comment=*) comment=${1/--comment=/''} ; shift ;;
     --comment*|-cm*) comment=${2} ; shift ; shift ;;
+    --debug|-d) debug='true' ; shift ;;
     --count=*) count=${1/--count=/''} ; shift ;;
     --count|-cn*) count=${2} ; shift ; shift ;;
     --emoji=*) emoji=${1/--emoji=/''} ; shift ;;
@@ -250,8 +251,42 @@ function jqify() {
   esac
 }
 
+function get_channels() {
+  # Cache channels list to avoid multiple API calls
+  if [ -z "${CHANNELS_CACHE}" ]; then
+    CHANNELS_CACHE=$(\
+      curl -s -X GET "https://slack.com/api/conversations.list?exclude_archived=true&limit=1000" \
+        -H "Authorization: Bearer ${token}" 2>&1)
+
+    # Display channels if debug mode is enabled
+    if [ -n "${debug}" ]; then
+      # Check if the response was successful
+      local ok=$(echo "${CHANNELS_CACHE}" | jq -r '.ok // "false"')
+      if [ "$ok" = "true" ]; then
+        echo "=== Available Channels ===" >&2
+        echo "${CHANNELS_CACHE}" | jq -r '.channels[]? | "  " + .id + " : #" + .name' >&2
+        echo "=========================" >&2
+      else
+        echo "=== Error: API call failed ===" >&2
+        echo "${CHANNELS_CACHE}" | jq -r '.error // "unknown error"' >&2
+        echo "=========================" >&2
+      fi
+    fi
+  fi
+
+  echo "${CHANNELS_CACHE}"
+}
+
 function lchannel() {
   case "${channel}" in
+    \#*)
+      local channels_data=$(get_channels)
+      local _channel=$(\
+        echo "${channels_data}" | \
+        jq -r ".channels | map(select(.name == \"${channel/#\#/}\")) | .[0].id")
+
+      [ -n "${_channel}" ] && [ "${_channel}" != "null" ] && echo ${_channel} || echo ${channel}
+    ;;
     @*)
       local _user=$(\
         curl -s -X POST https://slack.com/api/users.list --data-urlencode "token=${token}" 2>&1 | \
@@ -277,6 +312,36 @@ function luser() {
     ;;
     *) echo ${user} ;;
   esac
+}
+
+function lchannels() {
+  # Handle comma-separated channels list, converting each #channel-name to ID
+  local channels_input="${1}"
+  local result=""
+
+  # Split by comma and process each channel
+  IFS=',' read -ra CHANNEL_ARRAY <<< "${channels_input}"
+  for ch in "${CHANNEL_ARRAY[@]}"; do
+    # Trim whitespace
+    ch=$(echo "${ch}" | xargs)
+
+    # Process based on prefix
+    case "${ch}" in
+      \#*)
+        local channels_data=$(get_channels)
+        local _ch=$(\
+          echo "${channels_data}" | \
+          jq -r ".channels | map(select(.name == \"${ch/#\#/}\")) | .[0].id")
+
+        [ -n "${_ch}" ] && [ "${_ch}" != "null" ] && ch=${_ch}
+      ;;
+    esac
+
+    # Append to result
+    [ -z "${result}" ] && result="${ch}" || result="${result},${ch}"
+  done
+
+  echo "${result}"
 }
 
 # COMMAND FUNCTIONS ###############################################################################
@@ -324,26 +389,26 @@ function help() {
 
   echo 'Usage:'
   echo "  ${bin} chat delete [<timestamp> [channel]]"
-  echo '    [--channel|-ch <channel>] [--compact|-c] [--filter|-f <filter>] [--monochrome|-m]'
-  echo '    [--timestamp|-ts <timestamp>] [--trace|-x]'
+  echo '    [--channel|-ch <channel>] [--compact|-c] [--debug|-d] [--filter|-f <filter>]'
+  echo '    [--monochrome|-m] [--timestamp|-ts <timestamp>] [--trace|-x]'
   echo
   echo "  ${bin} chat send [<text> [channel]]"
   echo '    [--author|-at <author>] [--author-icon|-ai <author-icon-url>]'
   echo '    [--author-link|-al <author-link>] [--channel|-ch <channel>] [--color|-cl <color>]'
-  echo '    [--compact|-cp] [--fields|-flds <fields>] [--filter|-f <filter>] [--footer|-ft <footer>]'
-  echo '    [--footer-icon|-fi <footer-icon-url>] [--image|-im <image-url>] [--monochrome|-m]'
-  echo '    [--pretext|-pt <pretext>] [--text|-tx <text>] [--thumbnail|-th <thumbnail-url>]'
-  echo '    [--time|-tm <time>] [--title|-ti <title>] [--title-link|-tl <title-link>]'
-  echo '    [--trace|-x]'
+  echo '    [--compact|-cp] [--debug|-d] [--fields|-flds <fields>] [--filter|-f <filter>]'
+  echo '    [--footer|-ft <footer>] [--footer-icon|-fi <footer-icon-url>] [--image|-im <image-url>]'
+  echo '    [--monochrome|-m] [--pretext|-pt <pretext>] [--text|-tx <text>]'
+  echo '    [--thumbnail|-th <thumbnail-url>] [--time|-tm <time>] [--title|-ti <title>]'
+  echo '    [--title-link|-tl <title-link>] [--trace|-x]'
   echo
   echo "  ${bin} chat update [<text> [<timestamp> [channel]]]"
   echo '    [--author|-at <author>] [--author-icon|-ai <author-icon-url>]'
   echo '    [--author-link|-al <author-link>] [--channel|-ch <channel>] [--color|-cl <color>]'
-  echo '    [--compact|-cp] [--fields|flds <fields>] [--filter|-f <filter>] [--footer|-ft <footer>]'
-  echo '    [--footer-icon|-fi <footer-icon-url>] [--image|-im <image-url>] [--monochrome|-m]'
-  echo '    [--pretext|-pt <pretext>] [--text|-tx <text>] [--thumbnail|-th <thumbnail-url>]'
-  echo '    [--time|-tm <time>] [--timestamp|-ts <timestamp>] [--title|-ti <title>]'
-  echo '    [--title-link|-tl <title-link>] [--trace|-x]'
+  echo '    [--compact|-cp] [--debug|-d] [--fields|flds <fields>] [--filter|-f <filter>]'
+  echo '    [--footer|-ft <footer>] [--footer-icon|-fi <footer-icon-url>] [--image|-im <image-url>]'
+  echo '    [--monochrome|-m] [--pretext|-pt <pretext>] [--text|-tx <text>]'
+  echo '    [--thumbnail|-th <thumbnail-url>] [--time|-tm <time>] [--timestamp|-ts <timestamp>]'
+  echo '    [--title|-ti <title>] [--title-link|-tl <title-link>] [--trace|-x]'
   echo
   echo "  ${bin} init"
   echo '    [--compact|-c] [--filter|-f <filter>] [--monochrome|-m] [--token|-tk <token>]'
@@ -364,7 +429,7 @@ function help() {
   echo '    [--user|-ur <user>]'
   echo
   echo "  ${bin} file upload [<file> [channels]]"
-  echo '    [--channels|-chs <channels>] [--comment|-cm <comment>] [--compact|-c]'
+  echo '    [--channels|-chs <channels>] [--comment|-cm <comment>] [--compact|-c] [--debug|-d]'
   echo '    [--file|fl <file>] [--filename|-fn <filename>] [--filetype|-ft <filetype>]'
   echo '    [--filter|-f <filter>] [--monochrome|-m] [--title|-ti <title>] [--trace|-x]'
   echo
@@ -486,19 +551,22 @@ function filelist() {
 # Requires: curl, jq
 # Works on: macOS, Linux
 # Usage: fileupload_new <file> <channels> [comment] [title]
-# Environment: SLACK_TOKEN must be set
 
 function fileupload() {
 
-  local token="${token}"
-  local channel="${channels}"
+  local channel="$(lchannels "${channels}")"
   local comment="${comment}"
   local file="${file}"
   local filename="${filename:-$(basename "$file")}"
 
+  if [ -n "${debug}" ]; then
+    echo "DEBUG: Original channels: ${channels}" >&2
+    echo "DEBUG: Converted channel: ${channel}" >&2
+  fi
+
   echo FILE is ${file}
-  if [ -z "$SLACK_TOKEN" ]; then
-    echo "Error: SLACK_TOKEN not set" >&2
+  if [ -z "$token" ]; then
+    echo "Error: token not set" >&2
     return 1
   fi
 
@@ -535,7 +603,7 @@ function fileupload() {
 
   local upload_info
   upload_info=$(curl -s -X POST "https://slack.com/api/files.getUploadURLExternal?filename=$filename&length=$filesize" \
-    -H "Authorization: Bearer $SLACK_TOKEN" \
+    -H "Authorization: Bearer $token" \
     -H "Content-Type: application/json; charset=utf-8")
     #--data "$upload_payload"
     #--data "$(jq -n --arg fn "$filename" --arg ft "auto" --arg fs "$filesize" '{filename: $fn, length: ($fs|tonumber), filetype: $ft}')")
@@ -559,7 +627,7 @@ function fileupload() {
   local publish_payload
   publish_payload=$(jq -n \
     --argjson files "[{\"id\": \"$id\", \"title\": \"$title\"}]" \
-    --arg channels "$channels" \
+    --arg channels "$channel" \
     --arg comment "$comment" \
     --arg title "$title" \
     '{
@@ -569,9 +637,14 @@ function fileupload() {
       channels: $channels,
     }')
 
+  if [ -n "${debug}" ]; then
+    echo "DEBUG: Publish payload:" >&2
+    echo "$publish_payload" | jq '.' >&2
+  fi
+
   local publish_response
   publish_response=$(curl -s -X POST "https://slack.com/api/files.completeUploadExternal" \
-    -H "Authorization: Bearer $SLACK_TOKEN" \
+    -H "Authorization: Bearer $token" \
     -H "Content-Type: application/json; charset=utf-8" \
     --data "$publish_payload")
    
